@@ -33,9 +33,33 @@ if (-not $Mute) {
         $vozesInstaladas = $Global:ttsVoice.GetInstalledVoices() | Where-Object { $_.Enabled }
         if ($vozesInstaladas.Count -gt 0) {
             try { $Global:ttsVoice.SelectVoiceByHints('NotSet', 'NotSet', 0, [System.Globalization.CultureInfo]::GetCultureInfo('pt-BR')) } catch {}
+            $Global:ttsVoice.Rate = -4
             $Global:ttsOk = $true
         }
     } catch { $Global:ttsOk = $false }
+}
+
+# --- Leitura caractere a caractere, anunciando maiuscula/minuscula/numero,
+#     com pausa entre cada um - necessario porque falar so a letra nao
+#     distingue "A" maiusculo de "a" minusculo por audio. ---
+function Speak-Credential {
+    param([string]$Label, [string]$Value)
+    if (-not $Global:ttsOk -or [string]::IsNullOrWhiteSpace($Value)) { return }
+    try {
+        $pb = New-Object System.Speech.Synthesis.PromptBuilder
+        $pb.AppendText($Label)
+        $pb.AppendBreak([System.Speech.Synthesis.PromptBreak]::Medium)
+        foreach ($ch in $Value.ToCharArray()) {
+            if ($ch -cmatch '[A-Z]')      { $pb.AppendText("maiusculo $ch") }
+            elseif ($ch -cmatch '[a-z]')  { $pb.AppendText("minusculo $ch") }
+            elseif ($ch -match '[0-9]')   { $pb.AppendText("numero $ch") }
+            else                          { $pb.AppendText("$ch") }
+            $pb.AppendBreak([System.Speech.Synthesis.PromptBreak]::Medium)
+        }
+        $Global:ttsVoice.Speak($pb)
+    } catch {
+        Write-Host "Erro ao falar '$Label' por voz: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 }
 
 function Say {
@@ -259,13 +283,13 @@ Write-Host " IP(s) (referencia): $($ips -join ', ')"
 Write-Host " (RustDesk nao usa 'usuario' - so ID + senha, no app RustDesk, nao no Windows App)"
 Write-Host "================================================"
 
-# --- Leitura final por voz (duas vezes) ---
+# --- Leitura final por voz (duas vezes), letra a letra com pausa e caixa anunciada ---
 if ($Global:ttsOk) {
-    $idFalado    = if ($rdId) { ($rdId.ToCharArray() -join ' ') } else { 'nao disponivel, confira o terminal' }
-    $senhaFalada = ($RustDeskPassword.ToCharArray() -join ' ')
-    $textoFinal = "Resumo final. Computador $env:COMPUTERNAME. Identificador $idFalado. Senha $senhaFalada."
-    $Global:ttsVoice.Speak($textoFinal)
-    $Global:ttsVoice.Speak($textoFinal)
+    $Global:ttsVoice.Speak("Resumo final. Computador $env:COMPUTERNAME.")
+    for ($i = 1; $i -le 2; $i++) {
+        Speak-Credential -Label "Identificador" -Value $(if ($rdId) { $rdId } else { $null })
+        Speak-Credential -Label "Senha" -Value $RustDeskPassword
+    }
 } elseif (-not $Mute) {
     Write-Host "Nenhuma voz de sintese instalada neste Windows (Configuracoes > Hora e Idioma > Fala) - narracao por audio nao disponivel." -ForegroundColor Yellow
 }
