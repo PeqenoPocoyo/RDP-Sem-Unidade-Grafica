@@ -85,8 +85,20 @@ while ((-not $svc -or $svc.Status -ne 'Running') -and $tries -lt 10) {
 
 Start-Sleep -Seconds 3
 
-# --- ID permanente da maquina ---
-$rdId = (& .\rustdesk.exe --get-id 2>$null) | Select-Object -Last 1
+# --- ID permanente da maquina (com retry: pode levar alguns segundos apos instalar) ---
+Write-Host "Aguardando RustDesk gerar o ID..."
+$rdId = $null
+$idTries = 0
+while ([string]::IsNullOrWhiteSpace($rdId) -and $idTries -lt 15) {
+    $out  = & .\rustdesk.exe --get-id 2>$null
+    $last = ($out | Select-Object -Last 1)
+    if ($last -match '^\d{6,}$') { $rdId = $last }
+    if ([string]::IsNullOrWhiteSpace($rdId)) { Start-Sleep -Seconds 2 }
+    $idTries++
+}
+if ([string]::IsNullOrWhiteSpace($rdId)) {
+    Write-Host "AVISO: nao consegui ler o ID automaticamente. Rode manualmente: cd '$installDir'; .\rustdesk.exe --get-id" -ForegroundColor Yellow
+}
 
 # --- Senha permanente ---
 & .\rustdesk.exe --password $RustDeskPassword | Out-Null
@@ -129,34 +141,33 @@ Start-Sleep -Seconds 3
 # --- Regra de firewall (precaucao para modo P2P direto na LAN) ---
 New-NetFirewallRule -DisplayName 'RustDesk' -Direction Inbound -Program "$installDir\rustdesk.exe" -Action Allow -ErrorAction SilentlyContinue | Out-Null
 
-# --- IPs locais (referencia, RustDesk normalmente nao depende deles) ---
-$ips = Get-NetIPAddress -AddressFamily IPv4 |
-    Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.InterfaceAlias -notmatch 'Loopback' } |
-    Select-Object -ExpandProperty IPAddress
-
 Write-Host ""
 Write-Host "================================================" -ForegroundColor Green
 Write-Host " RustDesk instalado e configurado" -ForegroundColor Green
 Write-Host "================================================"
-Write-Host " Computador   : $env:COMPUTERNAME"
-Write-Host " RustDesk ID  : $rdId"
-Write-Host " Senha        : $RustDeskPassword"
-Write-Host " IP(s) (LAN)  : $($ips -join ', ')"
-Write-Host " Modo         : conexao por senha, sem clique local"
+Write-Host " Computador        : $env:COMPUTERNAME"
+Write-Host " ID de conexao     : $rdId   <- digite isso no campo 'ID' do app"
+Write-Host " Senha             : $RustDeskPassword"
+Write-Host " (nao existe campo 'usuario' no RustDesk, so ID + senha)"
 Write-Host "================================================"
 
 # --- Anuncia ID e senha por voz (util sem monitor conectado) ---
 if (-not $Mute) {
     try {
         Add-Type -AssemblyName System.Speech
-        $voice = New-Object System.Speech.Synthesis.SpeechSynthesizer
-        try { $voice.SelectVoiceByHints('NotSet', 'NotSet', 0, [System.Globalization.CultureInfo]::GetCultureInfo('pt-BR')) } catch {}
-        $idFalado    = ($rdId.ToCharArray() -join ' ')
-        $senhaFalada = ($RustDeskPassword.ToCharArray() -join ' ')
-        $texto = "RustDesk instalado no computador $env:COMPUTERNAME. Identificador $idFalado. Senha $senhaFalada."
-        $voice.Speak($texto)
-        $voice.Speak($texto)
+        $voice  = New-Object System.Speech.Synthesis.SpeechSynthesizer
+        $vozes  = $voice.GetInstalledVoices() | Where-Object { $_.Enabled }
+        if ($vozes.Count -eq 0) {
+            Write-Host "Nenhuma voz de sintese instalada neste Windows (Config > Hora e Idioma > Fala). TTS pulado." -ForegroundColor Yellow
+        } else {
+            try { $voice.SelectVoiceByHints('NotSet', 'NotSet', 0, [System.Globalization.CultureInfo]::GetCultureInfo('pt-BR')) } catch {}
+            $idFalado    = if ($rdId) { ($rdId.ToCharArray() -join ' ') } else { 'indisponivel, veja o terminal' }
+            $senhaFalada = if ($RustDeskPassword) { ($RustDeskPassword.ToCharArray() -join ' ') } else { 'indisponivel' }
+            $texto = "RustDesk instalado no computador $env:COMPUTERNAME. I D $idFalado. Senha $senhaFalada."
+            $voice.Speak($texto)
+            $voice.Speak($texto)
+        }
     } catch {
-        Write-Host "Sintetizador de voz indisponivel (sem saida de audio?)." -ForegroundColor Yellow
+        Write-Host "Erro no sintetizador de voz: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 }
