@@ -52,22 +52,28 @@ try {
     exit 1
 }
 
-# --- Instalacao silenciosa ---
+# --- Instalacao silenciosa (NAO usar -Wait: o processo fica residente apos instalar) ---
 Write-Host "Instalando..."
-Start-Process -FilePath $exePath -ArgumentList '--silent-install' -Wait
-Start-Sleep -Seconds 8
+Start-Process -FilePath $exePath -ArgumentList @('--silent-install', 'printer=0')
 
 $installDir = "$env:ProgramFiles\RustDesk"
-if (-not (Test-Path "$installDir\rustdesk.exe")) { $installDir = "${env:ProgramFiles(x86)}\RustDesk" }
+$tries = 0
+while (-not (Test-Path "$installDir\rustdesk.exe") -and $tries -lt 20) {
+    Start-Sleep -Seconds 2
+    if (-not (Test-Path "$installDir\rustdesk.exe")) { $installDir = "${env:ProgramFiles(x86)}\RustDesk" }
+    $tries++
+}
 if (-not (Test-Path "$installDir\rustdesk.exe")) {
     Write-Host "ERRO: instalacao nao encontrada em Program Files." -ForegroundColor Red
     exit 1
 }
+Write-Host "Instalado em $installDir."
 Set-Location $installDir
 
 # --- Registra como servico do Windows (roda mesmo sem ninguem logado) ---
 Write-Host "Registrando servico..."
-Start-Process -FilePath ".\rustdesk.exe" -ArgumentList '--install-service' -Wait
+Start-Process -FilePath ".\rustdesk.exe" -ArgumentList '--install-service'
+Start-Sleep -Seconds 10
 $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
 $tries = 0
 while ((-not $svc -or $svc.Status -ne 'Running') -and $tries -lt 10) {
