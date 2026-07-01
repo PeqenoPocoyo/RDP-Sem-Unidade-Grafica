@@ -1,10 +1,12 @@
 # ============================================================
 # Install-RustDesk.ps1
-# Instala o RustDesk silenciosamente, registra como SERVICO do
-# Windows (funciona antes/sem login, essencial p/ bancada sem
-# monitor), define senha permanente e configura o modo de
-# aprovacao "somente senha" (conecta sem exigir clique local).
-# Ao final, imprime e ANUNCIA POR VOZ o ID e a senha.
+# Instala RustDesk silenciosamente, registra como servico do
+# Windows, define senha permanente, configura modo "somente
+# senha" (sem clique local), e narra cada etapa por voz (TTS) -
+# util para maquinas sem monitor.
+#
+# Compativel com Windows 7+ / PowerShell 3+ (nao depende dos
+# modulos NetSecurity/NetTCPIP, que so existem no Windows 8+).
 #
 # Uso (PowerShell elevado - Win+R > powershell > Ctrl+Shift+Enter):
 #   irm https://SEU_HOST/Install-RustDesk.ps1 | iex
@@ -21,92 +23,155 @@ if (-not (Test-Path variable:RustDeskPassword) -or [string]::IsNullOrWhiteSpace(
     $RustDeskPassword = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 14 | ForEach-Object { [char]$_ })
 }
 
-# --- Checa elevacao ---
+# --- TTS: inicializa uma vez, reusa em todo o script ---
+$Global:ttsVoice = $null
+$Global:ttsOk = $false
+if (-not $Mute) {
+    try {
+        Add-Type -AssemblyName System.Speech -ErrorAction Stop
+        $Global:ttsVoice = New-Object System.Speech.Synthesis.SpeechSynthesizer
+        $vozesInstaladas = $Global:ttsVoice.GetInstalledVoices() | Where-Object { $_.Enabled }
+        if ($vozesInstaladas.Count -gt 0) {
+            try { $Global:ttsVoice.SelectVoiceByHints('NotSet', 'NotSet', 0, [System.Globalization.CultureInfo]::GetCultureInfo('pt-BR')) } catch {}
+            $Global:ttsOk = $true
+        }
+    } catch { $Global:ttsOk = $false }
+}
+
+function Say {
+    param([string]$Text, [string]$Color = 'Cyan')
+    Write-Host $Text -ForegroundColor $Color
+    if ($Global:ttsOk) {
+        try { $Global:ttsVoice.Speak($Text) } catch {}
+    }
+}
+
+Say "Iniciando verificacao de requisitos." 'Green'
+
+# --- Requisito 1: elevacao ---
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Host "ERRO: execute em PowerShell como Administrador (Win+R > powershell > Ctrl+Shift+Enter)." -ForegroundColor Red
+    Say "Erro. Este terminal nao esta como administrador. Abra o PowerShell como administrador e tente novamente." 'Red'
+    exit 1
+}
+Say "Permissao de administrador confirmada."
+
+# --- Requisito 2: versao do PowerShell (irm/iex exigem PS3+) ---
+$psMajor = $PSVersionTable.PSVersion.Major
+Say "PowerShell versao $psMajor detectado."
+if ($psMajor -lt 3) {
+    Say "Erro. Este Windows tem PowerShell muito antigo, versao minima e a tres. Atualize o Windows Management Framework." 'Red'
     exit 1
 }
 
+# --- Requisito 3: conectividade com a internet ---
+Say "Testando conexao com a internet."
+$netOk = $false
+try {
+    $testResp = Invoke-WebRequest -Uri 'https://github.com' -UseBasicParsing -TimeoutSec 10
+    if ($testResp.StatusCode -ge 200 -and $testResp.StatusCode -lt 400) { $netOk = $true }
+} catch { $netOk = $false }
+if ($netOk) {
+    Say "Internet: conectada."
+} else {
+    Say "Aviso. Nao consegui confirmar acesso a internet. O download pode falhar. Continuando mesmo assim." 'Yellow'
+}
+
+# --- Pasta de trabalho ---
 $work = "$env:TEMP\rustdesk-deploy"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
 # --- Descobre a ultima versao estavel (com fallback fixo) ---
-Write-Host "Verificando ultima versao do RustDesk..."
+Say "Verificando ultima versao do RustDesk."
 $fallbackVersion = '1.4.8'
 try {
-    $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest' -UseBasicParsing
+    $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest' -UseBasicParsing -TimeoutSec 15
     $version = $rel.tag_name.TrimStart('v')
     if ([string]::IsNullOrWhiteSpace($version)) { $version = $fallbackVersion }
 } catch {
     $version = $fallbackVersion
 }
+Say "Versao selecionada: $version."
+
 $exeUrl  = "https://github.com/rustdesk/rustdesk/releases/download/$version/rustdesk-$version-x86_64.exe"
 $exePath = Join-Path $work 'rustdesk.exe'
 
-Write-Host "Baixando RustDesk $version..."
+Say "Baixando instalador."
 try {
-    Invoke-WebRequest -Uri $exeUrl -OutFile $exePath -UseBasicParsing
+    Invoke-WebRequest -Uri $exeUrl -OutFile $exePath -UseBasicParsing -TimeoutSec 120
 } catch {
-    Write-Host "ERRO ao baixar o instalador: $_" -ForegroundColor Red
+    Say "Erro ao baixar o instalador. $($_.Exception.Message)" 'Red'
     exit 1
 }
+Say "Download concluido."
 
 # --- Instalacao silenciosa (NAO usar -Wait: o processo fica residente apos instalar) ---
-Write-Host "Instalando..."
+Say "Instalando RustDesk, sem interacao de menus."
 Start-Process -FilePath $exePath -ArgumentList @('--silent-install', 'printer=0')
 
 $installDir = "$env:ProgramFiles\RustDesk"
 $tries = 0
-while (-not (Test-Path "$installDir\rustdesk.exe") -and $tries -lt 20) {
+while (-not (Test-Path "$installDir\rustdesk.exe") -and $tries -lt 25) {
     Start-Sleep -Seconds 2
     if (-not (Test-Path "$installDir\rustdesk.exe")) { $installDir = "${env:ProgramFiles(x86)}\RustDesk" }
     $tries++
 }
 if (-not (Test-Path "$installDir\rustdesk.exe")) {
-    Write-Host "ERRO: instalacao nao encontrada em Program Files." -ForegroundColor Red
+    Say "Erro. Instalacao nao encontrada apos aguardar. Abortando." 'Red'
     exit 1
 }
-Write-Host "Instalado em $installDir."
+Say "Instalacao concluida em $installDir."
 Set-Location $installDir
 
 # --- Registra como servico do Windows (roda mesmo sem ninguem logado) ---
-Write-Host "Registrando servico..."
+Say "Registrando servico do Windows."
 Start-Process -FilePath ".\rustdesk.exe" -ArgumentList '--install-service'
-Start-Sleep -Seconds 10
-$svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+
+$svc = $null
 $tries = 0
-while ((-not $svc -or $svc.Status -ne 'Running') -and $tries -lt 10) {
-    Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+while ((-not $svc -or $svc.Status -ne 'Running') -and $tries -lt 15) {
     Start-Sleep -Seconds 3
+    Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
     $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
     $tries++
+}
+if ($svc -and $svc.Status -eq 'Running') {
+    Say "Servico registrado e em execucao."
+} else {
+    Say "Aviso. Nao consegui confirmar que o servico esta rodando. Vou continuar, mas verifique manualmente depois com Get-Service RustDesk." 'Yellow'
 }
 
 Start-Sleep -Seconds 3
 
-# --- ID permanente da maquina (com retry: pode levar alguns segundos apos instalar) ---
-Write-Host "Aguardando RustDesk gerar o ID..."
+# --- ID permanente da maquina ---
+# IMPORTANTE: no Windows, rustdesk.exe --get-id nao imprime nada se
+# chamado direto - e preciso forcar com Out-String, senao a saida
+# fica vazia mesmo funcionando internamente (comportamento documentado).
+Say "Obtendo identificador de conexao."
 $rdId = $null
 $idTries = 0
 while ([string]::IsNullOrWhiteSpace($rdId) -and $idTries -lt 15) {
-    $out  = & .\rustdesk.exe --get-id 2>$null
-    $last = ($out | Select-Object -Last 1)
-    if ($last -match '^\d{6,}$') { $rdId = $last }
+    $raw = (& .\rustdesk.exe --get-id 2>&1 | Out-String)
+    $candidate = ($raw -split "`r?`n" | Where-Object { $_ -match '^\d{6,}$' } | Select-Object -Last 1)
+    if ($candidate) { $rdId = $candidate.Trim() }
     if ([string]::IsNullOrWhiteSpace($rdId)) { Start-Sleep -Seconds 2 }
     $idTries++
 }
-if ([string]::IsNullOrWhiteSpace($rdId)) {
-    Write-Host "AVISO: nao consegui ler o ID automaticamente. Rode manualmente: cd '$installDir'; .\rustdesk.exe --get-id" -ForegroundColor Yellow
+if ($rdId) {
+    Say "Identificador obtido: $rdId"
+} else {
+    Say "Aviso. Nao consegui ler o identificador automaticamente. Pode ser uma falha conhecida de linha de comando em algumas versoes do RustDesk. Verifique manualmente rodando rustdesk ponto exe espaco traco traco get-id, com saida forcada por Out-String." 'Yellow'
 }
 
 # --- Senha permanente ---
-& .\rustdesk.exe --password $RustDeskPassword | Out-Null
+Say "Definindo senha de acesso."
+& .\rustdesk.exe --password $RustDeskPassword 2>&1 | Out-Null
+Start-Sleep -Seconds 2
 
 # --- Modo "somente senha": conecta sem clique local de aprovacao ---
 function Set-RustDeskOption {
     param([string]$TomlPath, [string]$Key, [string]$Value)
-    if (-not (Test-Path $TomlPath)) { return }
+    if (-not (Test-Path $TomlPath)) { return $false }
     $content = Get-Content $TomlPath -Raw
     if ($null -eq $content) { $content = '' }
     if ($content -notmatch '(?m)^\[options\]') { $content += "`n[options]`n" }
@@ -117,57 +182,87 @@ function Set-RustDeskOption {
         $content = $content -replace '\[options\]', "[options]`n$Key = '$Value'"
     }
     Set-Content -Path $TomlPath -Value $content -Encoding UTF8 -NoNewline
+    return $true
 }
 
+Say "Configurando conexao sem clique de aprovacao local."
 Stop-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 
 $serviceToml = "$env:SystemRoot\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk2.toml"
 $userToml    = "$env:APPDATA\RustDesk\config\RustDesk2.toml"
+$configApplied = $false
 
 foreach ($toml in @($serviceToml, $userToml)) {
     try {
-        Set-RustDeskOption -TomlPath $toml -Key 'approve-mode' -Value 'password'
-        Set-RustDeskOption -TomlPath $toml -Key 'allow-logon-screen-password' -Value 'Y'
-        Set-RustDeskOption -TomlPath $toml -Key 'enable-lan-discovery' -Value 'Y'
+        $ok1 = Set-RustDeskOption -TomlPath $toml -Key 'approve-mode' -Value 'password'
+        Set-RustDeskOption -TomlPath $toml -Key 'allow-logon-screen-password' -Value 'Y' | Out-Null
+        Set-RustDeskOption -TomlPath $toml -Key 'enable-lan-discovery' -Value 'Y' | Out-Null
+        if ($ok1) { $configApplied = $true }
     } catch {
-        Write-Host "Aviso: nao consegui ajustar $toml ($_)" -ForegroundColor Yellow
+        Say "Aviso. Nao consegui ajustar configuracao em $toml." 'Yellow'
     }
 }
 
 Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 3
 
-# --- Regra de firewall (precaucao para modo P2P direto na LAN) ---
-New-NetFirewallRule -DisplayName 'RustDesk' -Direction Inbound -Program "$installDir\rustdesk.exe" -Action Allow -ErrorAction SilentlyContinue | Out-Null
+# --- Verificacao final: config realmente aplicada? ---
+$verificado = $false
+if (Test-Path $serviceToml) {
+    $checkContent = Get-Content $serviceToml -Raw
+    if ($checkContent -match "approve-mode\s*=\s*'password'") { $verificado = $true }
+}
+if ($verificado) {
+    Say "Confirmado: aprovacao automatica por senha esta ativa."
+} else {
+    Say "Aviso. Nao consegui confirmar a configuracao de aprovacao automatica. A conexao pode ainda pedir clique local na primeira tentativa." 'Yellow'
+}
+
+$svcFinal = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+if ($svcFinal -and $svcFinal.Status -eq 'Running') {
+    Say "Servico confirmado em execucao apos reinicio de configuracao."
+} else {
+    Say "Aviso. Servico nao esta rodando apos a reconfiguracao. Rode Start-Service RustDesk manualmente." 'Yellow'
+}
+
+# --- Firewall (best-effort via netsh, compativel com qualquer Windows; NAO e obrigatorio) ---
+# RustDesk conecta por saida (outbound) ao servidor de relay publico por padrao,
+# entao isso so importa para o modo P2P direto na LAN - falha aqui nao impede o uso normal.
+try {
+    netsh advfirewall firewall delete rule name="RustDesk" | Out-Null
+    netsh advfirewall firewall add rule name="RustDesk" dir=in action=allow program="$installDir\rustdesk.exe" enable=yes | Out-Null
+    Say "Regra de firewall aplicada."
+} catch {
+    Say "Aviso. Nao consegui ajustar o firewall, mas isso normalmente nao impede a conexao via relay." 'Yellow'
+}
+
+# --- IPs locais (informativo apenas - via .NET puro, funciona em qualquer versao) ---
+$ips = @()
+try {
+    $ips = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
+        Where-Object { $_.AddressFamily -eq 'InterNetwork' -and $_.ToString() -notlike '169.254.*' } |
+        ForEach-Object { $_.ToString() }
+} catch {}
 
 Write-Host ""
 Write-Host "================================================" -ForegroundColor Green
 Write-Host " RustDesk instalado e configurado" -ForegroundColor Green
 Write-Host "================================================"
 Write-Host " Computador        : $env:COMPUTERNAME"
-Write-Host " ID de conexao     : $rdId   <- digite isso no campo 'ID' do app"
+Write-Host " ID de conexao     : $(if ($rdId) { $rdId } else { 'FALHOU - veja avisos acima' })"
 Write-Host " Senha             : $RustDeskPassword"
-Write-Host " (nao existe campo 'usuario' no RustDesk, so ID + senha)"
+Write-Host " IP(s) (referencia): $($ips -join ', ')"
+Write-Host " (RustDesk nao usa 'usuario' - so ID + senha, no app RustDesk, nao no Windows App)"
 Write-Host "================================================"
 
-# --- Anuncia ID e senha por voz (util sem monitor conectado) ---
-if (-not $Mute) {
-    try {
-        Add-Type -AssemblyName System.Speech
-        $voice  = New-Object System.Speech.Synthesis.SpeechSynthesizer
-        $vozes  = $voice.GetInstalledVoices() | Where-Object { $_.Enabled }
-        if ($vozes.Count -eq 0) {
-            Write-Host "Nenhuma voz de sintese instalada neste Windows (Config > Hora e Idioma > Fala). TTS pulado." -ForegroundColor Yellow
-        } else {
-            try { $voice.SelectVoiceByHints('NotSet', 'NotSet', 0, [System.Globalization.CultureInfo]::GetCultureInfo('pt-BR')) } catch {}
-            $idFalado    = if ($rdId) { ($rdId.ToCharArray() -join ' ') } else { 'indisponivel, veja o terminal' }
-            $senhaFalada = if ($RustDeskPassword) { ($RustDeskPassword.ToCharArray() -join ' ') } else { 'indisponivel' }
-            $texto = "RustDesk instalado no computador $env:COMPUTERNAME. I D $idFalado. Senha $senhaFalada."
-            $voice.Speak($texto)
-            $voice.Speak($texto)
-        }
-    } catch {
-        Write-Host "Erro no sintetizador de voz: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
+# --- Leitura final por voz (duas vezes) ---
+if ($Global:ttsOk) {
+    $idFalado    = if ($rdId) { ($rdId.ToCharArray() -join ' ') } else { 'nao disponivel, confira o terminal' }
+    $senhaFalada = ($RustDeskPassword.ToCharArray() -join ' ')
+    $textoFinal = "Resumo final. Computador $env:COMPUTERNAME. Identificador $idFalado. Senha $senhaFalada."
+    $Global:ttsVoice.Speak($textoFinal)
+    $Global:ttsVoice.Speak($textoFinal)
+} elseif (-not $Mute) {
+    Write-Host "Nenhuma voz de sintese instalada neste Windows (Configuracoes > Hora e Idioma > Fala) - narracao por audio nao disponivel." -ForegroundColor Yellow
 }
