@@ -109,14 +109,17 @@ Say "Download concluido."
 Say "Instalando RustDesk, sem interacao de menus."
 Start-Process -FilePath $exePath -ArgumentList @('--silent-install', 'printer=0')
 
-$installDir = "$env:ProgramFiles\RustDesk"
+$candidateDirs = @("$env:ProgramFiles\RustDesk", "${env:ProgramFiles(x86)}\RustDesk")
+$installDir = $null
 $tries = 0
-while (-not (Test-Path "$installDir\rustdesk.exe") -and $tries -lt 25) {
-    Start-Sleep -Seconds 2
-    if (-not (Test-Path "$installDir\rustdesk.exe")) { $installDir = "${env:ProgramFiles(x86)}\RustDesk" }
+while (-not $installDir -and $tries -lt 25) {
+    foreach ($c in $candidateDirs) {
+        if (Test-Path "$c\rustdesk.exe") { $installDir = $c; break }
+    }
+    if (-not $installDir) { Start-Sleep -Seconds 2 }
     $tries++
 }
-if (-not (Test-Path "$installDir\rustdesk.exe")) {
+if (-not $installDir) {
     Say "Erro. Instalacao nao encontrada apos aguardar. Abortando." 'Red'
     exit 1
 }
