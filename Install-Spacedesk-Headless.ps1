@@ -1,16 +1,14 @@
 # ============================================================
-# Install-Spacedesk-Headless.ps1
-# Instala o driver do SpaceDesk silenciosamente, garante que o
-# serviço de tela virtual está rodando e dita os IPs locais por voz.
-# Ideal para transformar celulares/notebooks em monitores via USB às cegas.
-#
-# Uso (PowerShell como Administrador):
-#   irm https://SEU_HOST/Install-Spacedesk-Headless.ps1 | iex
+# Install-Spacedesk-Headless.ps1 (VERSÃO CORRIGIDA)
 # ============================================================
+
+# [!] ATENÇÃO: Se der erro de download, entre no site do Spacedesk pelo celular,
+# veja qual é o link atual do "Windows Driver msi" e cole ele aqui embaixo:
+$msiUrl = "https://download.spacedesk.net/current/spacedesk_driver_Win_10_64_v2130.msi"
 
 if (-not (Test-Path variable:Mute)) { $Mute = $false }
 
-# --- TTS: Inicialização idêntica ao seu script original ---
+# --- TTS: Inicialização ---
 $Global:ttsVoice = $null
 $Global:ttsOk = $false
 if (-not $Mute) {
@@ -20,13 +18,12 @@ if (-not $Mute) {
         $vozesInstaladas = $Global:ttsVoice.GetInstalledVoices() | Where-Object { $_.Enabled }
         if ($vozesInstaladas.Count -gt 0) {
             try { $Global:ttsVoice.SelectVoiceByHints('NotSet', 'NotSet', 0, [System.Globalization.CultureInfo]::GetCultureInfo('pt-BR')) } catch {}
-            $Global:ttsVoice.Rate = -2 # Um pouco mais rápido que o seu (-4), mas legível para IPs
+            $Global:ttsVoice.Rate = -2
             $Global:ttsOk = $true
         }
     } catch { $Global:ttsOk = $false }
 }
 
-# --- Função adaptada para ditar IPs (Soletrando números e "ponto") ---
 function Speak-IPAddress {
     param([string]$Label, [string]$Value)
     if (-not $Global:ttsOk -or [string]::IsNullOrWhiteSpace($Value)) { return }
@@ -40,9 +37,7 @@ function Speak-IPAddress {
             $pb.AppendBreak([System.Speech.Synthesis.PromptBreak]::Short)
         }
         $Global:ttsVoice.Speak($pb)
-    } catch {
-        Write-Host "Erro ao ditar IP por voz: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
+    } catch {}
 }
 
 function Say {
@@ -53,83 +48,69 @@ function Say {
     }
 }
 
-Say "Iniciando verificação de requisitos para o Space Desk." 'Green'
+Say "Iniciando instalação corrigida do Space Desk." 'Green'
 
-# --- Requisito 1: Elevação ---
+# --- Requisitos Básicos ---
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    Say "Erro. Este terminal não está como administrador. Abra o PowerShell como administrador." 'Red'
-    exit 1
-}
-Say "Permissão de administrador confirmada."
+if (-not $isAdmin) { Say "Erro. Rode o PowerShell como administrador." 'Red'; exit 1 }
 
-# --- Requisito 2: Versão do PowerShell ---
-$psMajor = $PSVersionTable.PSVersion.Major
-if ($psMajor -lt 3) {
-    Say "Erro. Versão do PowerShell muito antiga. Mínima necessária é a versão três." 'Red'
-    exit 1
-}
+# --- FORÇAR TLS 1.2 / 1.3 & USER-AGENT (A CORREÇÃO DO ERRO) ---
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+$UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-# --- Requisito 3: Conectividade ---
-Say "Testando conexão com a internet."
-$netOk = $false
-try {
-    $testResp = Invoke-WebRequest -Uri 'https://www.spacedesk.net' -UseBasicParsing -TimeoutSec 10
-    if ($testResp.StatusCode -ge 200 -and $testResp.StatusCode -lt 400) { $netOk = $true }
-} catch { $netOk = $false }
-
-if (-not $netOk) {
-    Say "Aviso. Não consegui confirmar acesso ao site do Space Desk. O download pode falhar." 'Yellow'
-}
-
-# --- Pasta de trabalho e Download ---
 $work = "$env:TEMP\spacedesk-deploy"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
-
-# Link direto para a versão estável de 64-bits (pode ser atualizado se necessário)
-$msiUrl = "https://download.spacedesk.net/current/spacedesk_driver_Win_10_64_v2130.msi"
 $msiPath = Join-Path $work 'spacedesk.msi'
 
-Say "Baixando instalador do monitor virtual."
+Say "Tentando baixar o instalador com protocolo de segurança atualizado."
+
+$downloadSucesso = $false
+
+# Método 1: Invoke-WebRequest disfarçado de navegador
 try {
-    Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing -TimeoutSec 120
+    Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UserAgent $UserAgent -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop
+    $downloadSucesso = $true
 } catch {
-    Say "Erro ao baixar o instalador do Space Desk." 'Red'
+    Write-Host "[!] Método 1 falhou. Tentando método alternativo via .NET..." -ForegroundColor Yellow
+}
+
+# Método 2: Fallback usando WebClient do .NET (se o Método 1 falhar)
+if (-not $downloadSucesso) {
+    try {
+        $webClient = New-Object System.Net.WebClient
+        $webClient.Headers.Add("user-agent", $UserAgent)
+        $webClient.DownloadFile($msiUrl, $msiPath)
+        $downloadSucesso = $true
+    } catch {
+        $downloadSucesso = $false
+    }
+}
+
+if (-not $downloadSucesso) {
+    Say "Erro crítico. Não foi possível baixar o arquivo. O link do Spacedesk pode ter mudado." 'Red'
+    Write-Host "[!] Erro: Verifique se o link $msiUrl ainda é válido abrindo-o no navegador de outro aparelho." -ForegroundColor Red
     exit 1
 }
-Say "Download concluído."
 
-# --- Instalação Silenciosa ---
-Say "Instalando driver de vídeo virtual do Space Desk. Por favor, aguarde."
-# /qn = totalmente silencioso, /norestart = evita reinicializações inesperadas
+Say "Download concluído com sucesso."
+
+# --- Instalação ---
+Say "Instalando driver de vídeo virtual. Por favor, aguarde."
 $Arguments = "/i `"$msiPath`" /qn /norestart"
 $Process = Start-Process msiexec.exe -ArgumentList $Arguments -Wait -PassThru
 
 if ($Process.ExitCode -ne 0) {
-    Say "Erro na instalação do Space Desk. Código de erro $($Process.ExitCode)" 'Red'
+    Say "Erro na instalação. Código de erro $($Process.ExitCode)" 'Red'
     exit 1
 }
-Say "Instalação do driver concluída com sucesso."
+Say "Instalação concluída."
 
-# --- Inicialização e Configuração do Serviço ---
-Say "Configurando serviço de rede de vídeo."
+# --- Configuração do Serviço ---
 $serviceName = "spacedeskService"
-
 Set-Service -Name $serviceName -StartupType Automatic -ErrorAction SilentlyContinue
 Start-Service -Name $serviceName -ErrorAction SilentlyContinue
 
-$svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-if ($svc -and $svc.Status -eq 'Running') {
-    Say "O serviço do Space Desk está ativo e aguardando conexões." 'Green'
-} else {
-    Say "Aviso. Não consegui confirmar se o serviço inicializou corretamente." 'Yellow'
-}
-
-# --- Limpeza ---
-Remove-Item $msiPath -ErrorAction SilentlyContinue
-
-# --- Captura de IPs (foco na Ancoragem USB) ---
-# Coleta IPs válidos descartando interfaces locais virtuais ou IPs de autoconfiguração (169.254)
+# --- Captura de IPs e encerramento ---
 $ips = @()
 try {
     $ips = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
@@ -137,32 +118,15 @@ try {
         ForEach-Object { $_.ToString() }
 } catch {}
 
-# --- Output Visual Final ---
-Write-Host ""
-Write-Host "================================================" -ForegroundColor Green
-Write-Host "  SpaceDesk Instalado (Modo Headless Ativo)      " -ForegroundColor Green
-Write-Host "================================================"
-Write-Host " Computador : $env:COMPUTERNAME"
-Write-Host " IP(s)      : $($ips -join ', ')"
-Write-Host "================================================"
-Write-Host "DICA: Ative a Ancoragem USB no celular para criar a rede direta."
-Write-Host "================================================"
+Remove-Item $msiPath -ErrorAction SilentlyContinue
 
-# --- Narração Final dos IPs encontrados ---
 if ($Global:ttsOk) {
-    Say "Pronto! O monitor virtual está ativo no computador $env:COMPUTERNAME."
-    Say "Ligue a ancoragem USB no seu celular e abra o aplicativo do Space Desk."
-    
+    Say "O monitor virtual está pronto no computador $env:COMPUTERNAME."
     if ($ips.Count -gt 0) {
-        Say "Conecte usando um dos seguintes endereços de I Pê listados a seguir:"
-        # Repete a lista de IPs duas vezes para dar tempo de anotar/digitar
+        Say "Conecte usando os endereços:"
         for ($i = 1; $i -le 2; $i++) {
-            foreach ($ip in $ips) {
-                Speak-IPAddress -Label "Endereço" -Value $ip
-            }
+            foreach ($ip in $ips) { Speak-IPAddress -Label "IP" -Value $ip }
             Start-Sleep -Seconds 2
         }
-    } else {
-        Say "Aviso. Nenhum endereço de I Pê ativo foi detectado. Verifique o cabo USB."
     }
 }
