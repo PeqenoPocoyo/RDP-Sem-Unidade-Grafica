@@ -1,10 +1,7 @@
 # ============================================================
-# Install-Spacedesk-Headless.ps1 (VERSÃO CORRIGIDA)
+# Install-Spacedesk-Dynamic.ps1 (VERSÃO ULTRA-ROBUSTA)
+# Varre o site da SpaceDesk, descobre o link atual e instala às cegas.
 # ============================================================
-
-# [!] ATENÇÃO: Se der erro de download, entre no site do Spacedesk pelo celular,
-# veja qual é o link atual do "Windows Driver msi" e cole ele aqui embaixo:
-$msiUrl = "https://download.spacedesk.net/current/spacedesk_driver_Win_10_64_v2130.msi"
 
 if (-not (Test-Path variable:Mute)) { $Mute = $false }
 
@@ -43,39 +40,66 @@ function Speak-IPAddress {
 function Say {
     param([string]$Text, [string]$Color = 'Cyan')
     Write-Host $Text -ForegroundColor $Color
-    if ($Global:ttsOk) {
-        try { $Global:ttsVoice.Speak($Text) } catch {}
-    }
+    if ($Global:ttsOk) { try { $Global:ttsVoice.Speak($Text) } catch {} }
 }
 
-Say "Iniciando instalação corrigida do Space Desk." 'Green'
+function Pensa-E-Fecha {
+    param([string]$MsgErro)
+    Say $MsgErro 'Red'
+    Write-Host "`n[!] A fechar em 15 segundos para dar tempo de ler o erro..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 15
+    exit 1
+}
 
-# --- Requisitos Básicos ---
+Say "A iniciar a instalação inteligente do Space Desk." 'Green'
+
+# --- Requisitos ---
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) { Say "Erro. Rode o PowerShell como administrador." 'Red'; exit 1 }
+if (-not $isAdmin) { Pensa-E-Fecha "Erro. Precisa de executar o PowerShell como Administrador." }
 
-# --- FORÇAR TLS 1.2 / 1.3 & USER-AGENT (A CORREÇÃO DO ERRO) ---
+# --- Configuração de Rede Segura e Agente de Navegador ---
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 $UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+# --- RASTREADOR DINÂMICO DE URL (A MÁGICA) ---
+Say "A varrer o site da Space Desk à procura do link mais recente."
+$msiUrl = $null
+$paginasParaVarrer = @(
+    "https://www.spacedesk.net/",
+    "https://www.spacedesk.net/multi-monitor-app-download/"
+)
+
+foreach ($url in $paginasParaVarrer) {
+    try {
+        $html = Invoke-WebRequest -Uri $url -UserAgent $UserAgent -UseBasicParsing -TimeoutSec 15 -ErrorAction SilentlyContinue
+        # Expressão regular para capturar qualquer link MSI de 64 bits atualizado
+        if ($html.Content -match '(https://download\.spacedesk\.net/[^"\s>]+\d+_64_v[^"\s>]+\.msi)') {
+            $msiUrl = $Matches[1]
+            Write-Host "[+] Link dinâmico encontrado: $msiUrl" -ForegroundColor Green
+            break
+        }
+    } catch {}
+}
+
+# Se a varredura falhar, tenta um palpite padrão como última alternativa
+if ([string]::IsNullOrEmpty($msiUrl)) {
+    Write-Host "[!] Não foi possível rastrear o link automaticamente. A tentar palpite padrão..." -ForegroundColor Yellow
+    $msiUrl = "https://download.spacedesk.net/current/spacedesk_driver_Win_10_64_v2130.msi"
+}
+
+# --- Preparar Downloads ---
 $work = "$env:TEMP\spacedesk-deploy"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 $msiPath = Join-Path $work 'spacedesk.msi'
 
-Say "Tentando baixar o instalador com protocolo de segurança atualizado."
-
+Say "A transferir o instalador."
 $downloadSucesso = $false
 
-# Método 1: Invoke-WebRequest disfarçado de navegador
 try {
     Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UserAgent $UserAgent -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop
     $downloadSucesso = $true
 } catch {
-    Write-Host "[!] Método 1 falhou. Tentando método alternativo via .NET..." -ForegroundColor Yellow
-}
-
-# Método 2: Fallback usando WebClient do .NET (se o Método 1 falhar)
-if (-not $downloadSucesso) {
+    Write-Host "[!] Erro no método primário de download. A tentar método secundário..." -ForegroundColor Yellow
     try {
         $webClient = New-Object System.Net.WebClient
         $webClient.Headers.Add("user-agent", $UserAgent)
@@ -83,34 +107,32 @@ if (-not $downloadSucesso) {
         $downloadSucesso = $true
     } catch {
         $downloadSucesso = $false
+        $detalheErro = $_.Exception.Message
     }
 }
 
 if (-not $downloadSucesso) {
-    Say "Erro crítico. Não foi possível baixar o arquivo. O link do Spacedesk pode ter mudado." 'Red'
-    Write-Host "[!] Erro: Verifique se o link $msiUrl ainda é válido abrindo-o no navegador de outro aparelho." -ForegroundColor Red
-    exit 1
+    Pensa-E-Fecha "Erro crítico. Não foi possível descarregar o instalador. Detalhe técnico: $detalheErro"
 }
 
-Say "Download concluído com sucesso."
+Say "Transferência concluída."
 
-# --- Instalação ---
-Say "Instalando driver de vídeo virtual. Por favor, aguarde."
+# --- Instalação Silenciosa ---
+Say "A instalar o controlador de vídeo virtual. Aguarde."
 $Arguments = "/i `"$msiPath`" /qn /norestart"
 $Process = Start-Process msiexec.exe -ArgumentList $Arguments -Wait -PassThru
 
 if ($Process.ExitCode -ne 0) {
-    Say "Erro na instalação. Código de erro $($Process.ExitCode)" 'Red'
-    exit 1
+    Pensa-E-Fecha "Erro interno na instalação. Código de erro da MSI: $($Process.ExitCode)"
 }
-Say "Instalação concluída."
+Say "Instalação concluída com sucesso."
 
-# --- Configuração do Serviço ---
+# --- Configuração e Ativação do Serviço ---
 $serviceName = "spacedeskService"
 Set-Service -Name $serviceName -StartupType Automatic -ErrorAction SilentlyContinue
 Start-Service -Name $serviceName -ErrorAction SilentlyContinue
 
-# --- Captura de IPs e encerramento ---
+# --- Captura de IPs para Conexão ---
 $ips = @()
 try {
     $ips = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
@@ -123,10 +145,12 @@ Remove-Item $msiPath -ErrorAction SilentlyContinue
 if ($Global:ttsOk) {
     Say "O monitor virtual está pronto no computador $env:COMPUTERNAME."
     if ($ips.Count -gt 0) {
-        Say "Conecte usando os endereços:"
+        Say "Ligue o cabo e ligue a ancoragem no seu dispositivo. Conecte usando os endereços:"
         for ($i = 1; $i -le 2; $i++) {
             foreach ($ip in $ips) { Speak-IPAddress -Label "IP" -Value $ip }
             Start-Sleep -Seconds 2
         }
+    } else {
+        Say "Aviso. Nenhum endereço de rede detetado. Verifique a ligação por cabo."
     }
 }
